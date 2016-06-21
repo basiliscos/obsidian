@@ -57,13 +57,17 @@ impl<F> EventStream<F> for ByteEventSteam<F> {
 
 }
 
-pub struct DummyReactor<'a, F> {
-  actions: Vec<&'a Fn() -> bool>,
+pub struct DummyReactor<F, G>
+  where G: Fn() -> bool,
+{
+  actions: Vec<G>,
   streams: Vec<ByteEventSteam<F>>,
 }
 
-impl<'a, F> DummyReactor<'a, F> where
-  F : Fn(&EventStream<F>),
+
+impl<F, G> DummyReactor<F, G> where
+  F: Fn(&EventStream<F>),
+  G: Fn() -> bool,
   {
 
   fn new() -> Self {
@@ -77,8 +81,11 @@ impl<'a, F> DummyReactor<'a, F> where
     self.streams.push(stream);
   }
 
+  fn push_action(&mut self, action: G) {
+    self.actions.push(action);
+  }
+
   fn play(&self) {
-    //where F : Fn(&EventStream<F>) {
     for bes in &self.streams {
       bes.trigger_read_cb();
     }
@@ -94,6 +101,7 @@ mod tests {
     #[test]
     fn simple_echo() {
       let mut dr = DummyReactor::new();
+
       let mut bes = ByteEventSteam::new(1024);
 
       bes.push_write(Bytes::from_slice(&String::from("ping?").into_bytes()));
@@ -104,10 +112,9 @@ mod tests {
         vector_data.extend_from_slice(data);
         let request = unsafe { String::from_utf8_unchecked(vector_data) };
         assert_eq!(request, "ping?");
-        //read_buff.clear();
       });
-
       dr.register(bes);
+
       dr.play();
     }
 }
