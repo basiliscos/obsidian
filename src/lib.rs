@@ -13,7 +13,7 @@ pub trait EventStream<F> {
   fn push_write(&mut self, buf: Bytes);
   fn set_read(&mut self, f: F)
     where F : Fn(&EventStream<F>);
-  fn get_buf<'a>(&'a self) -> &'a Rc<RefCell<MutByteBuf>>;
+  fn get_buf<'a>(&'a self) -> &'a RefCell<MutByteBuf>;
 }
 
 pub struct ByteEventSteam<F> {
@@ -51,23 +51,23 @@ impl<F> EventStream<F> for ByteEventSteam<F> {
     self.read_cb = Some(f);
   }
 
-  fn get_buf<'a>(&'a self) -> &'a Rc<RefCell<MutByteBuf>> {
+  fn get_buf<'a>(&'a self) -> &'a RefCell<MutByteBuf> {
     &self.read_buff
   }
 
 }
 
-pub struct DummyReactor<F, G>
-  where G: Fn() -> bool,
+pub struct DummyReactor<'a, F:'a, G:'a>
+  where G: Fn(&ByteEventSteam<F>) -> bool,
 {
-  actions: Vec<G>,
-  streams: Vec<ByteEventSteam<F>>,
+  actions: Vec<(G, &'a ByteEventSteam<F>)>,
+  streams: Vec<&'a ByteEventSteam<F>>,
 }
 
 
-impl<F, G> DummyReactor<F, G> where
+impl<'a, F:'a, G:'a> DummyReactor<'a, F, G> where
   F: Fn(&EventStream<F>),
-  G: Fn() -> bool,
+  G: Fn(&ByteEventSteam<F>) -> bool,
   {
 
   fn new() -> Self {
@@ -77,43 +77,75 @@ impl<F, G> DummyReactor<F, G> where
     }
   }
 
-  fn register(&mut self, stream: ByteEventSteam<F>)  {
+  fn register(&mut self, stream: &'a ByteEventSteam<F>)  {
     self.streams.push(stream);
   }
 
-  fn push_action(&mut self, action: G) {
-    self.actions.push(action);
+  fn push_action(&mut self, stream: &'a ByteEventSteam<F>, action: G) {
+    self.actions.push((action, stream));
   }
 
   fn play(&self) {
+    for &(ref action, ref stream) in &self.actions {
+      action(stream);
+      stream.trigger_read_cb();
+    }
+    /*
     for bes in &self.streams {
       bes.trigger_read_cb();
     }
+    */
   }
-
 }
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use bytes::str::Bytes;
+    use bytes::str::ToBytes;
+    use bytes::buf::{ByteBuf, MutByteBuf};
+    use bytes::ByteStr;
+    use bytes::buf::Source;
+
+    use std::ops::Deref;
+
 
     #[test]
     fn simple_echo() {
-      let mut dr = DummyReactor::new();
-
       let mut bes = ByteEventSteam::new(1024);
+
+      let mut dr = DummyReactor::new();
 
       bes.push_write(Bytes::from_slice(&String::from("ping?").into_bytes()));
       bes.set_read(|stream| {
         let read_buff = stream.get_buf().borrow_mut();
         let data = read_buff.bytes();
+
         let mut vector_data =  Vec::new();
         vector_data.extend_from_slice(data);
         let request = unsafe { String::from_utf8_unchecked(vector_data) };
         assert_eq!(request, "ping?");
       });
-      dr.register(bes);
+
+      dr.push_action(&bes, |stream| {
+        let mut read_buff = stream.get_buf().borrow_mut();
+        let new_bytes = Bytes::from_slice(&String::from("ping?").into_bytes());
+        let old_bytes = Bytes::from_slice(read_buff.bytes());
+        let concat_bytes = old_bytes.concat(&new_bytes);
+        let mut new_read_buff = ByteBuf::mut_with_capacity(concat_bytes.len());
+
+        let result_buf = concat_bytes.buf();
+        let result_bytes = result_buf.deref().bytes();
+        assert_eq!(result_bytes, [112, 105, 110, 103, 63]);
+        let result_read_buf = ByteBuf::from_slice(result_bytes);
+        *read_buff = result_read_buf.resume();
+
+        false
+      });
+
+      dr.register(&bes);
+
 
       dr.play();
     }
