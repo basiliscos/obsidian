@@ -1,34 +1,32 @@
-extern crate bytes;
+extern crate bytebuffer;
 
-use bytes::buf::{ByteBuf, MutByteBuf};
-use bytes::buf::MutBuf;
-use bytes::str::Bytes;
-use bytes::ByteStr;
+use bytebuffer::ByteBuffer;
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use std::vec::Vec;
 
 pub trait EventStream<F> {
-  fn push_write(&mut self, buf: Bytes);
+  fn push_write(&self, buf: &[u8]);
   fn set_read(&mut self, f: F)
     where F : Fn(&EventStream<F>);
-  fn get_buf<'a>(&'a self) -> &'a RefCell<MutByteBuf>;
+  fn get_buf<'a>(&'a self) -> &'a RefCell<ByteBuffer>;
 }
 
+
 pub struct ByteEventSteam<F> {
-  write_buff: Bytes,
-  read_buff: Rc<RefCell<MutByteBuf>>,
+  write_buff: Rc<RefCell<ByteBuffer>>,
+  read_buff: Rc<RefCell<ByteBuffer>>,
   read_cb: Option<F>,
 }
 
 impl<F> ByteEventSteam<F> {
-  fn new(capacity: usize) -> Self
+  fn new() -> Self
     where F : Fn(&EventStream<F>)
   {
     ByteEventSteam {
-      write_buff: Bytes::empty(),
-      read_buff: Rc::new(RefCell::new(ByteBuf::mut_with_capacity(capacity))),
+      write_buff: Rc::new(RefCell::new(ByteBuffer::new())),
+      read_buff: Rc::new(RefCell::new(ByteBuffer::new())),
       read_cb: None,
     }
   }
@@ -43,15 +41,16 @@ impl<F> ByteEventSteam<F> {
 }
 
 impl<F> EventStream<F> for ByteEventSteam<F> {
-  fn push_write(&mut self, buf: Bytes) {
-    self.write_buff = self.write_buff.concat(&buf);
+  fn push_write(&self, buf: &[u8]) {
+    let mut write_buff = self.write_buff.borrow_mut();
+    write_buff.write_bytes(buf);
   }
 
   fn set_read(&mut self, f: F) {
     self.read_cb = Some(f);
   }
 
-  fn get_buf<'a>(&'a self) -> &'a RefCell<MutByteBuf> {
+  fn get_buf<'a>(&'a self) -> &'a RefCell<ByteBuffer> {
     &self.read_buff
   }
 
@@ -90,63 +89,39 @@ impl<'a, F:'a, G:'a> DummyReactor<'a, F, G> where
       action(stream);
       stream.trigger_read_cb();
     }
-    /*
-    for bes in &self.streams {
-      bes.trigger_read_cb();
-    }
-    */
   }
 }
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::str::Bytes;
-    use bytes::str::ToBytes;
-    use bytes::buf::{ByteBuf, MutByteBuf};
-    use bytes::ByteStr;
-    use bytes::buf::Source;
-
-    use std::ops::Deref;
-
 
     #[test]
     fn simple_echo() {
-      let mut bes = ByteEventSteam::new(1024);
+      let mut bes = ByteEventSteam::new();
+
+      bes.set_read(|stream| {
+        let read_buff = stream.get_buf().borrow_mut();
+        let data = read_buff.to_bytes();
+        let request = unsafe { String::from_utf8_unchecked(data) };
+        assert_eq!(request, "ping?");
+
+        stream.push_write(&String::from("pong!").into_bytes());
+      });
 
       let mut dr = DummyReactor::new();
 
-      bes.push_write(Bytes::from_slice(&String::from("ping?").into_bytes()));
-      bes.set_read(|stream| {
-        let read_buff = stream.get_buf().borrow_mut();
-        let data = read_buff.bytes();
-
-        let mut vector_data =  Vec::new();
-        vector_data.extend_from_slice(data);
-        let request = unsafe { String::from_utf8_unchecked(vector_data) };
-        assert_eq!(request, "ping?");
-      });
-
       dr.push_action(&bes, |stream| {
         let mut read_buff = stream.get_buf().borrow_mut();
-        let new_bytes = Bytes::from_slice(&String::from("ping?").into_bytes());
-        let old_bytes = Bytes::from_slice(read_buff.bytes());
-        let concat_bytes = old_bytes.concat(&new_bytes);
-        let mut new_read_buff = ByteBuf::mut_with_capacity(concat_bytes.len());
-
-        let result_buf = concat_bytes.buf();
-        let result_bytes = result_buf.deref().bytes();
-        assert_eq!(result_bytes, [112, 105, 110, 103, 63]);
-        let result_read_buf = ByteBuf::from_slice(result_bytes);
-        *read_buff = result_read_buf.resume();
-
+        read_buff.write_bytes(&String::from("ping?").into_bytes());
         false
       });
 
       dr.register(&bes);
 
-
       dr.play();
+      let response = unsafe { String::from_utf8_unchecked(bes.write_buff.borrow().to_bytes()) };
+      assert_eq!(response, "pong!");
+
     }
 }
