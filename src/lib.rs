@@ -4,6 +4,8 @@ use bytebuffer::ByteBuffer;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+// http://tailhook.github.io/netbuf/netbuf/struct.Buf.html
+
 use std::vec::Vec;
 
 pub trait EventStream<F> {
@@ -101,10 +103,11 @@ mod tests {
       let mut bes = ByteEventSteam::new();
 
       bes.set_read(|stream| {
-        let read_buff = stream.get_buf().borrow_mut();
+        let mut read_buff = stream.get_buf().borrow_mut();
         let data = read_buff.to_bytes();
         let request = unsafe { String::from_utf8_unchecked(data) };
         assert_eq!(request, "ping?");
+        read_buff.clear();
 
         stream.push_write(&String::from("pong!").into_bytes());
       });
