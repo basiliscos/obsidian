@@ -8,123 +8,124 @@ use std::rc::Rc;
 
 use std::vec::Vec;
 
-pub trait EventStream<F> {
+pub trait EventStream {
   fn push_write(&self, buf: &[u8]);
-  fn set_read(&mut self, f: F)
-    where F : Fn(&EventStream<F>);
-  fn get_buf<'a>(&'a self) -> &'a RefCell<ByteBuffer>;
+  fn set_read(&self, f: Box<Fn(&EventStream, Rc<RefCell<ByteBuffer>>)>);
 }
 
-
-pub struct ByteEventSteam<F> {
+pub struct ByteEventSteam {
   write_buff: Rc<RefCell<ByteBuffer>>,
   read_buff: Rc<RefCell<ByteBuffer>>,
-  read_cb: Option<F>,
+  read_cb: RefCell<Option<Box<Fn(&EventStream, Rc<RefCell<ByteBuffer>>)>>>,
 }
 
-impl<F> ByteEventSteam<F> {
-  fn new() -> Self
-    where F : Fn(&EventStream<F>)
-  {
-    ByteEventSteam {
-      write_buff: Rc::new(RefCell::new(ByteBuffer::new())),
-      read_buff: Rc::new(RefCell::new(ByteBuffer::new())),
-      read_cb: None,
-    }
-  }
-
-  fn trigger_read_cb(&self)
-    where F : Fn(&EventStream<F>)
-  {
-    if let Some(cb) = self.read_cb.as_ref() {
-      cb(self);
-    }
-  }
-}
-
-impl<F> EventStream<F> for ByteEventSteam<F> {
+impl EventStream for ByteEventSteam {
   fn push_write(&self, buf: &[u8]) {
     let mut write_buff = self.write_buff.borrow_mut();
     write_buff.write_bytes(buf);
   }
 
-  fn set_read(&mut self, f: F) {
-    self.read_cb = Some(f);
+  fn set_read(&self, f: Box<Fn(&EventStream, Rc<RefCell<ByteBuffer>>)>) {
+    let mut cb = self.read_cb.borrow_mut();
+    *cb = Some(f);
   }
-
-  fn get_buf<'a>(&'a self) -> &'a RefCell<ByteBuffer> {
-    &self.read_buff
-  }
-
 }
 
-pub struct DummyReactor<'a, F:'a, G:'a>
-  where G: Fn(&ByteEventSteam<F>) -> bool,
+impl ByteEventSteam {
+  fn new() -> Self {
+    ByteEventSteam {
+      write_buff: Rc::new(RefCell::new(ByteBuffer::new())),
+      read_buff: Rc::new(RefCell::new(ByteBuffer::new())),
+      read_cb: RefCell::new(None),
+    }
+  }
+
+  fn trigger_read_cb(&self) {
+    let read_cb = self.read_cb.borrow();
+    if let Some(cb) = read_cb.as_ref() {
+      cb(self, self.read_buff.clone());
+    }
+  }
+}
+
+pub struct DummyReactor<'a>
 {
-  actions: Vec<(G, &'a ByteEventSteam<F>)>,
-  streams: Vec<&'a ByteEventSteam<F>>,
+  actions: Vec<(Box<Fn(&ByteEventSteam)>, Rc<&'a ByteEventSteam>)>,
 }
 
-
-impl<'a, F:'a, G:'a> DummyReactor<'a, F, G> where
-  F: Fn(&EventStream<F>),
-  G: Fn(&ByteEventSteam<F>) -> bool,
-  {
+impl<'a> DummyReactor<'a> {
 
   fn new() -> Self {
     DummyReactor {
-      streams: Vec::new(),
       actions: Vec::new(),
     }
   }
 
-  fn register(&mut self, stream: &'a ByteEventSteam<F>)  {
-    self.streams.push(stream);
-  }
-
-  fn push_action(&mut self, stream: &'a ByteEventSteam<F>, action: G) {
+  fn push_action(&mut self, stream: Rc<&'a ByteEventSteam>, action: Box<Fn(&ByteEventSteam)>) {
     self.actions.push((action, stream));
   }
 
   fn play(&self) {
-    for &(ref action, ref stream) in &self.actions {
-      action(stream);
+      for &(ref action, ref stream) in &self.actions {
+      let bes:&ByteEventSteam = stream.as_ref();
+      action(bes);
       stream.trigger_read_cb();
     }
   }
 }
 
+
+pub struct PingProtocol<'a> {
+  stream: &'a EventStream
+}
+
+impl<'a> PingProtocol<'a>
+{
+  fn new(mut stream: &'a EventStream) -> Self {
+
+
+    stream.set_read(Box::new(|stream, rx_rc| {
+      println!("!");
+
+      let mut rx_buff = rx_rc.borrow_mut();
+
+      let data = rx_buff.to_bytes();
+      let request = unsafe { String::from_utf8_unchecked(data) };
+      rx_buff.clear();
+
+      stream.push_write(&String::from("pong!").into_bytes());
+    }));
+
+    PingProtocol { stream: stream }
+  }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     #[test]
     fn simple_echo() {
-      let mut bes = ByteEventSteam::new();
 
-      bes.set_read(|stream| {
-        let mut read_buff = stream.get_buf().borrow_mut();
-        let data = read_buff.to_bytes();
-        let request = unsafe { String::from_utf8_unchecked(data) };
-        assert_eq!(request, "ping?");
-        read_buff.clear();
 
-        stream.push_write(&String::from("pong!").into_bytes());
-      });
+      let bes = ByteEventSteam::new();
+      let bes_rc = Rc::new(&bes);
+      let ping = PingProtocol::new(&bes);
 
       let mut dr = DummyReactor::new();
 
-      dr.push_action(&bes, |stream| {
-        let mut read_buff = stream.get_buf().borrow_mut();
+      dr.push_action(bes_rc.clone(), Box::new(|stream| {
+        let mut read_buff = stream.read_buff.borrow_mut();
         read_buff.write_bytes(&String::from("ping?").into_bytes());
-        false
-      });
+      }));
 
-      dr.register(&bes);
 
       dr.play();
+
       let response = unsafe { String::from_utf8_unchecked(bes.write_buff.borrow().to_bytes()) };
       assert_eq!(response, "pong!");
-
     }
 }
