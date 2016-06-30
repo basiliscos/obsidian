@@ -122,10 +122,15 @@ mod tests {
         read_buff.write_bytes(&String::from("ping?").into_bytes());
       }));
 
+      dr.push_action(bes_rc.clone(), Box::new(|stream| {
+        let mut read_buff = stream.read_buff.borrow_mut();
+        read_buff.write_bytes(&String::from("ping?").into_bytes());
+      }));
+
 
       dr.play();
 
       let response = unsafe { String::from_utf8_unchecked(bes.write_buff.borrow().to_bytes()) };
-      assert_eq!(response, "pong!");
+      assert_eq!(response, "pong!pong!");
     }
 }
